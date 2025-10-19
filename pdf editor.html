@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Redaction Tool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+    <script src="https://unpkg.com/pdfjs-dist@3.4.120/build/pdf.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        #pdf-render-container {
+            position: relative;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        #pdf-canvas, #overlay-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        #overlay-canvas {
+            cursor: crosshair;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 flex flex-col items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-5xl bg-white rounded-xl shadow-lg p-6 md:p-8">
+        <div class="text-center mb-6">
+            <h1 class="text-3xl md:text-4xl font-bold text-gray-900">PDF Redaction Tool</h1>
+            <p class="text-gray-600 mt-2">Redact sensitive information directly in your browser. Your files stay private.</p>
+        </div>
+
+        <!-- File Upload Section -->
+        <div id="upload-container" class="text-center p-8 border-2 border-dashed border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+            <input type="file" id="pdf-upload" accept="application/pdf" class="hidden">
+            <label for="pdf-upload" class="cursor-pointer">
+                <svg class="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true">
+                    <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+                <span class="mt-2 block text-sm font-medium text-gray-900">
+                    Click to upload a PDF
+                </span>
+                <span class="mt-1 block text-xs text-gray-500">
+                    PDF files only
+                </span>
+            </label>
+        </div>
+
+        <!-- PDF Viewer and Editor -->
+        <div id="editor-container" class="hidden mt-6">
+            <div id="pdf-render-container" class="mx-auto mb-4 w-full">
+                <canvas id="pdf-canvas"></canvas>
+                <canvas id="overlay-canvas"></canvas>
+            </div>
+
+            <!-- Controls -->
+            <div id="controls" class="flex items-center justify-between bg-gray-50 p-3 rounded-lg">
+                <div class="flex items-center gap-4">
+                    <button id="prev-page" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">Previous</button>
+                    <span id="page-info" class="font-medium text-gray-700">Page <span id="page-num"></span> of <span id="page-count"></span></span>
+                    <button id="next-page" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">Next</button>
+                </div>
+                <div class="flex items-center gap-4">
+                     <button id="undo-btn" class="px-4 py-2 bg-yellow-500 text-white rounded-md hover:bg-yellow-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">Undo</button>
+                    <button id="download-btn" class="px-6 py-2 bg-blue-600 text-white font-semibold rounded-md hover:bg-blue-700 transition-colors">Download Redacted PDF</button>
+                </div>
+            </div>
+            <div id="loading-spinner" class="hidden text-center mt-4">
+                <div role="status" class="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-blue-500 border-r-transparent align-[-0.125em] motion-reduce:animate-[spin_1.5s_linear_infinite]">
+                </div>
+                <p class="mt-2 font-medium">Processing your PDF...</p>
+            </div>
+             <!-- Error Message Display -->
+            <div id="error-message" class="hidden mt-4 p-3 bg-red-100 text-red-700 rounded-lg text-sm text-center"></div>
+        </div>
+    </div>
+
+    <script>
+        const { PDFDocument, rgb } = PDFLib;
+        
+        // Setup PDF.js worker
+        pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@3.4.120/build/pdf.worker.min.js`;
+
+        // DOM Elements
+        const uploadContainer = document.getElementById('upload-container');
+        const editorContainer = document.getElementById('editor-container');
+        const pdfUpload = document.getElementById('pdf-upload');
+        const pdfCanvas = document.getElementById('pdf-canvas');
+        const overlayCanvas = document.getElementById('overlay-canvas');
+        const prevPageBtn = document.getElementById('prev-page');
+        const nextPageBtn = document.getElementById('next-page');
+        const pageNumSpan = document.getElementById('page-num');
+        const pageCountSpan = document.getElementById('page-count');
+        const downloadBtn = document.getElementById('download-btn');
+        const undoBtn = document.getElementById('undo-btn');
+        const loadingSpinner = document.getElementById('loading-spinner');
+        const errorMessageDiv = document.getElementById('error-message');
+
+        // State
+        let pdfDoc = null;
+        let currentPageNum = 1;
+        let redactionRects = {}; // { pageNum: [ {x, y, width, height} ] }
+        let isDrawing = false;
+        let startX, startY;
+        let currentRect = {};
+        let originalPdfBytes = null;
+
+        const pdfCtx = pdfCanvas.getContext('2d');
+        const overlayCtx = overlayCanvas.getContext('2d');
+
+        // Event Listeners
+        pdfUpload.addEventListener('change', handleFileUpload);
+        prevPageBtn.addEventListener('click', showPrevPage);
+        nextPageBtn.addEventListener('click', showNextPage);
+        undoBtn.addEventListener('click', undoLastRedaction);
+        downloadBtn.addEventListener('click', savePdf);
+
+        overlayCanvas.addEventListener('mousedown', startDrawing);
+        overlayCanvas.addEventListener('mousemove', draw);
+        overlayCanvas.addEventListener('mouseup', stopDrawing);
+        overlayCanvas.addEventListener('mouseout', stopDrawing);
+
+
+        async function handleFileUpload(event) {
+            errorMessageDiv.classList.add('hidden'); // Hide previous errors
+            const file = event.target.files[0];
+            if (file && file.type === 'application/pdf') {
+                const fileReader = new FileReader();
+                fileReader.onload = async (e) => {
+                    originalPdfBytes = e.target.result; // Keep for pdf-lib
+
+                    // Create a copy of the ArrayBuffer for PDF.js to prevent the original from being detached.
+                    const pdfjsBytes = originalPdfBytes.slice(0);
+                    const typedarray = new Uint8Array(pdfjsBytes); // Use the copy for rendering
+                    
+                    try {
+                        // Pass the copy to PDF.js
+                        pdfDoc = await pdfjsLib.getDocument(typedarray).promise;
+                    
+                        uploadContainer.classList.add('hidden');
+                        editorContainer.classList.remove('hidden');
+
+                        pageCountSpan.textContent = pdfDoc.numPages;
+                        redactionRects = {}; // Reset for new file
+                        for (let i = 1; i <= pdfDoc.numPages; i++) {
+                            redactionRects[i] = [];
+                        }
+                        
+                        currentPageNum = 1;
+                        renderPage(currentPageNum);
+
+                    } catch (error) {
+                        console.error("Error loading PDF:", error);
+                        errorMessageDiv.textContent = `Could not load this PDF. It might be corrupted or password-protected. Please try another file.`;
+                        errorMessageDiv.classList.remove('hidden');
+                    }
+                };
+                fileReader.readAsArrayBuffer(file);
+            } else {
+                errorMessageDiv.textContent = 'Please select a valid PDF file.';
+                errorMessageDiv.classList.remove('hidden');
+            }
+        }
+
+        async function renderPage(num) {
+            const page = await pdfDoc.getPage(num);
+            const viewport = page.getViewport({ scale: 1.5 });
+
+            pdfCanvas.height = viewport.height;
+            pdfCanvas.width = viewport.width;
+            overlayCanvas.height = viewport.height;
+            overlayCanvas.width = viewport.width;
+            
+            document.getElementById('pdf-render-container').style.height = `${viewport.height}px`;
+
+            const renderContext = {
+                canvasContext: pdfCtx,
+                viewport: viewport
+            };
+            await page.render(renderContext).promise;
+
+            pageNumSpan.textContent = num;
+            updatePageButtons();
+            redrawOverlay();
+        }
+
+        function updatePageButtons() {
+            prevPageBtn.disabled = currentPageNum <= 1;
+            nextPageBtn.disabled = currentPageNum >= pdfDoc.numPages;
+            undoBtn.disabled = !redactionRects[currentPageNum] || redactionRects[currentPageNum].length === 0;
+        }
+
+        function showPrevPage() {
+            if (currentPageNum <= 1) return;
+            currentPageNum--;
+            renderPage(currentPageNum);
+        }
+
+        function showNextPage() {
+            if (currentPageNum >= pdfDoc.numPages) return;
+            currentPageNum++;
+            renderPage(currentPageNum);
+        }
+
+        function redrawOverlay() {
+            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+            const rects = redactionRects[currentPageNum] || [];
+            overlayCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            rects.forEach(rect => {
+                overlayCtx.fillRect(rect.x, rect.y, rect.width, rect.height);
+            });
+            updatePageButtons();
+        }
+        
+        function getMousePos(canvas, evt) {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: evt.clientX - rect.left,
+                y: evt.clientY - rect.top
+            };
+        }
+        
+        function startDrawing(e) {
+            e.preventDefault();
+            const pos = getMousePos(overlayCanvas, e);
+            startX = pos.x;
+            startY = pos.y;
+            isDrawing = true;
+        }
+
+        function draw(e) {
+            if (!isDrawing) return;
+            e.preventDefault();
+            const pos = getMousePos(overlayCanvas, e);
+            
+            const width = pos.x - startX;
+            const height = pos.y - startY;
+
+            redrawOverlay(); // Redraw existing rects first
+            overlayCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            overlayCtx.fillRect(startX, startY, width, height);
+
+            currentRect = { x: startX, y: startY, width, height };
+        }
+
+        function stopDrawing(e) {
+            if (!isDrawing) return;
+            isDrawing = false;
+            
+            let rect = {
+                x: currentRect.width > 0 ? currentRect.x : currentRect.x + currentRect.width,
+                y: currentRect.height > 0 ? currentRect.y : currentRect.y + currentRect.height,
+                width: Math.abs(currentRect.width),
+                height: Math.abs(currentRect.height)
+            };
+
+            if (rect.width > 5 && rect.height > 5) {
+                if (!redactionRects[currentPageNum]) {
+                    redactionRects[currentPageNum] = [];
+                }
+                redactionRects[currentPageNum].push(rect);
+            }
+            redrawOverlay();
+            currentRect = {};
+        }
+
+        function undoLastRedaction() {
+            const rects = redactionRects[currentPageNum];
+            if (rects && rects.length > 0) {
+                rects.pop();
+                redrawOverlay();
+            }
+        }
+
+        async function savePdf() {
+            if (!originalPdfBytes) return;
+
+            errorMessageDiv.classList.add('hidden');
+            loadingSpinner.classList.remove('hidden');
+            downloadBtn.disabled = true;
+
+            try {
+                const pdfToModify = await PDFDocument.load(originalPdfBytes);
+                const pages = pdfToModify.getPages();
+                
+                for (let i = 0; i < pages.length; i++) {
+                    const page = pages[i];
+                    const pageNum = i + 1;
+                    const rectsOnPage = redactionRects[pageNum];
+                    
+                    if (rectsOnPage && rectsOnPage.length > 0) {
+                        const { width: pageWidth, height: pageHeight } = page.getSize();
+                        
+                        const canvasWidth = pdfCanvas.width;
+                        const scale = pageWidth / canvasWidth;
+
+                        rectsOnPage.forEach(rect => {
+                            const pdfX = rect.x * scale;
+                            const pdfY = pageHeight - (rect.y * scale) - (rect.height * scale);
+                            const pdfWidth = rect.width * scale;
+                            const pdfHeight = rect.height * scale;
+                            
+                            page.drawRectangle({
+                                x: pdfX,
+                                y: pdfY,
+                                width: pdfWidth,
+                                height: pdfHeight,
+                                color: rgb(0, 0, 0),
+                            });
+                        });
+                    }
+                }
+
+                const pdfBytes = await pdfToModify.save();
+
+                const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = 'redacted-document.pdf';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            } catch (error) {
+                console.error("Error saving PDF:", error);
+                errorMessageDiv.textContent = `An error occurred while creating the redacted PDF: ${error.message}. Please try again.`;
+                errorMessageDiv.classList.remove('hidden');
+            } finally {
+                loadingSpinner.classList.add('hidden');
+                downloadBtn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
+
