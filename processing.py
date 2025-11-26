@@ -12,7 +12,7 @@ from io import BytesIO
 import os
 
 # ==================== CONFIG ====================
-OPENROUTER_API_KEY = "your_openrouter_api_key_here"
+OPENROUTER_API_KEY = "your_openrouter_api_key_her"
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
