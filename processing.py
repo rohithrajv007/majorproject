@@ -12,8 +12,12 @@ from io import BytesIO
 import os
 
 # ==================== CONFIG ====================
+
+
+
 # ❗ Replace this with your actual key or use an environment variable
-OPENROUTER_API_KEY = "sk-or-v1"
+OPENROUTER_API_KEY = "sk-or-v1-efdec55ddf520dbb54fa8f433d46b64b25c4c5045d94574bcaa2643d539"
+
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
